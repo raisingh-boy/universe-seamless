@@ -11,7 +11,7 @@ interface EdgeProps {
 }
 
 const EdgeLine: React.FC<EdgeProps> = ({ edge, source, target, color }) => {
-  const lineRef = useRef<THREE.Line>(null!);
+  const lineRef = useRef<any>(null!);
 
   const { points, center } = useMemo(() => {
     const sx = source.x || 0;

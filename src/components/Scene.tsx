@@ -304,13 +304,16 @@ function InfoPanel({ node, onClose, connections, isMobile, stories, lang, t, all
 }
 
 // === NODE ===
-function EntryNode({ data, color, onSelect, isSelected, isMobile, highlight, hidden }: {
+function EntryNode({ data, color, onSelect, isSelected, isMobile, highlight, hidden, labelsHidden, nodePositions }: {
   data: any; color: string; onSelect: () => void; isSelected: boolean; isMobile: boolean;
-  highlight?: boolean; hidden?: boolean;
+  highlight?: boolean; hidden?: boolean; labelsHidden?: boolean;
+  nodePositions?: React.RefObject<Map<string, {x: number; y: number; z: number}>>;
 }) {
   const groupRef = useRef<THREE.Group>(null!);
   const meshRef = useRef<THREE.Mesh>(null!);
   const glowRef = useRef<THREE.Mesh>(null!);
+  
+  const degNorm = data._degreeNorm || 0;
   const [started] = useState(() => Date.now());
 
   useFrame(({ clock }) => {
@@ -328,8 +331,29 @@ function EntryNode({ data, color, onSelect, isSelected, isMobile, highlight, hid
     const se = 1 - Math.pow(1 - s, 3);
 
     groupRef.current.position.lerp(
-      { x: data.x * se, y: data.y * se, z: data.z * se } as any, 0.08
+      { x: data.x || 0, y: data.y || 0, z: data.z || 0 } as any, 0.08
     );
+
+    // Gentle floating: apply sine-wave offset ON TOP of lerp target
+    if (entry > 0.5 && nodePositions) {
+      // Store the lerped base position separately
+      const baseX = data.x || 0;
+      const baseY = data.y || 0;
+      const baseZ = data.z || 0;
+      // Floating is additive offset from base (not += which drifts)
+      const floatAmp = 0.4 + degNorm * 0.3; // hubs float slightly more
+      const floatX = Math.sin(t * 0.35 + idx * 0.7) * 0.6 * floatAmp;
+      const floatY = Math.sin(t * 0.25 + idx * 1.3) * 0.6 * floatAmp;
+      const floatZ = Math.sin(t * 0.3 + idx * 0.9) * 0.4 * floatAmp;
+      groupRef.current.position.x = baseX + floatX;
+      groupRef.current.position.y = baseY + floatY;
+      groupRef.current.position.z = baseZ + floatZ;
+      nodePositions.current.set(data.id, {
+        x: groupRef.current.position.x,
+        y: groupRef.current.position.y,
+        z: groupRef.current.position.z
+      });
+    }
 
     // Audio-synced pulse: combine natural pulse with audio phase
     const audioWave = 0.5 + Math.sin(phase * 3 + idx) * 0.5;
@@ -338,16 +362,14 @@ function EntryNode({ data, color, onSelect, isSelected, isMobile, highlight, hid
     const pulseAmp = isSelected ? 0.35 : 0.18;
     const pulse = 1 + combinedPulse * pulseAmp;
 
-    const degNorm = data._degreeNorm || 0;
     const hubBoost = 1 + degNorm * 0.4;  // hubs are bigger
     const scale = pulse * se * (isSelected ? 1.3 : 1) * hubBoost;
     meshRef.current.scale.setScalar(scale);
 
-    // Glow follows audio + degree (hubs glow brighter)
+    // Glow follows audio + degree
     const degGlow = 1 + degNorm * 0.5;
     const glowAmp = 1 + combinedPulse * 0.4;
     glowRef.current.scale.setScalar(glowAmp * (1 + Math.sin(t * 0.35 + idx) * 0.3) * entry * (isSelected ? 1.5 : 1) * degGlow);
-
     if (glowRef.current.material) {
       (glowRef.current.material as THREE.MeshStandardMaterial).opacity = (isSelected ? 0.3 : 0.1) * entry * (0.6 + audioWave * 0.4);
     }
@@ -380,9 +402,9 @@ function EntryNode({ data, color, onSelect, isSelected, isMobile, highlight, hid
       </mesh>
       <mesh ref={meshRef} onClick={(e) => { e.stopPropagation(); onSelect(); }}>
         <sphereGeometry args={[data.r, 20, 20]} />
-        <meshStandardMaterial color={color} emissive={color} emissiveIntensity={isSelected ? 0.8 : 0.5} />
+        <meshStandardMaterial color={color} emissive={color} emissiveIntensity={isSelected ? 1.5 : 0.8} />
       </mesh>
-      {(!isSelected && !hidden) && <Html position={[0, -data.r - 0.6, 0]} center style={{ pointerEvents: "none" }}>
+      {(!isSelected && !hidden && !labelsHidden) && <Html position={[0, -data.r - 0.6, 0]} center style={{ pointerEvents: "none" }}>
         <span style={{
           color: highlight !== false ? `rgba(255,255,240,0.7)` : `rgba(255,255,240,0.08)`,
           fontFamily: "Inter, system-ui, sans-serif",
@@ -398,19 +420,28 @@ function EntryNode({ data, color, onSelect, isSelected, isMobile, highlight, hid
 }
 
 // === EDGE ===
-function ConnectionLine({ from, to, selected, srcColor }: {
+function ConnectionLine({ from, to, selected, srcColor, nodePositions }: {
   from: any; to: any; selected: string | null; srcColor: string;
+  nodePositions: React.MutableRefObject<Map<string, any>>;
 }) {
   const ref = useRef<any>(null!);
   const particleRef = useRef<any>(null!);
   const isConnected = selected && (selected === from.id || selected === to.id);
-  const c = new THREE.Color(isConnected ? srcColor : "#ffffff");
+  const ATTENUATION = 1;
 
-  const { points, curve } = useMemo(() => {
-    const sx = from.x || 0, sy = from.y || 0, sz = from.z || 0;
-    const tx = to.x || 0, ty = to.y || 0, tz = to.z || 0;
+  useFrame(({ clock }) => {
+    const t = clock.getElapsedTime();
+    const phase = getAudioPhase();
+
+    // LIVE positions from animated nodes (elastic connection!)
+    const fp = nodePositions ? nodePositions.current.get(from.id) || from : from;
+    const tp = nodePositions ? nodePositions.current.get(to.id) || to : to;
+    const sx = fp.x || 0, sy = fp.y || 0, sz = fp.z || 0;
+    const tx = tp.x || 0, ty = tp.y || 0, tz = tp.z || 0;
     const dx = tx - sx, dy = ty - sy, dz = tz - sz;
     const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
+
+    // Rebuild bezier curve per frame
     const offset = Math.min(dist * 0.25, 3);
     const midX = (sx + tx) / 2 + (dy / (dist || 1)) * offset;
     const midY = (sy + ty) / 2 - (dx / (dist || 1)) * offset;
@@ -420,41 +451,43 @@ function ConnectionLine({ from, to, selected, srcColor }: {
       new THREE.Vector3(midX, midY, midZ),
       new THREE.Vector3(tx, ty, tz)
     );
-    return { points: curve.getPoints(30), curve };
-  }, [from.x, from.y, from.z, to.x, to.y, to.z]);
+    const nPts = 20;
+    const pts = curve.getPoints(nPts);
 
-  const positions = useMemo(
-    () => new Float32Array(points.flatMap((p: any) => [p.x, p.y, p.z])),
-    [points]
-  );
+    // Update geometry buffer in-place (stretchy edge!)
+    if (ref.current) {
+      const pos = ref.current.geometry.attributes.position;
+      const arr = pos.array;
+      for (let i = 0; i < nPts; i++) {
+        arr[i*3] = pts[i].x;
+        arr[i*3+1] = pts[i].y;
+        arr[i*3+2] = pts[i].z;
+      }
+      pos.needsUpdate = true;
 
-  useFrame(({ clock }) => {
-    const t = clock.getElapsedTime();
-    const phase = getAudioPhase();
-    if (ref.current?.material) {
-      const breath = 0.12 + Math.sin(t * 0.3 + from.x * 0.5) * 0.06;
-      // Audio-reactive pulse: sync breath with audio phase
-      const audioSync = 0.5 + Math.sin(phase * 2 + from.x) * 0.5;
+      // Material pulse
+      const breath = 0.12 + Math.sin(t * 0.3 + sx * 0.5) * 0.06;
+      const audioSync = 0.5 + Math.sin(phase * 2 + sx) * 0.5;
       const targetOpacity = isConnected
         ? (0.6 + Math.sin(t * 0.8) * 0.25 + audioSync * 0.15)
         : (breath + audioSync * 0.04);
-      (ref.current.material as THREE.MeshStandardMaterial).opacity = Math.max(0.04, Math.min(0.85, targetOpacity));
-      // Scale line brightness with music
+      ref.current.material.opacity = Math.max(0.04, Math.min(0.85, targetOpacity));
       const color = new THREE.Color(srcColor);
       const bright = isConnected ? 1.5 : 1;
       color.multiplyScalar(0.6 + audioSync * 0.3 * bright);
-      (ref.current.material as THREE.MeshStandardMaterial).color = color;
+      ref.current.material.color = color;
     }
-    if (particleRef.current?.position) {
-      const progress = (t * 0.06 + from.x * 0.01) % 1;
+
+    // Particle along live curve
+    if (particleRef.current) {
+      const progress = (t * 0.06 + sx * 0.01) % 1;
       const p = curve.getPoint(progress);
       particleRef.current.position.copy(p);
       if (particleRef.current.material) {
-        const pBright = isConnected ? (0.6 + Math.sin(t * 1.2 + from.x) * 0.3) : (0.15 + Math.sin(t * 0.3) * 0.1);
-        (particleRef.current.material as THREE.MeshStandardMaterial).opacity = Math.min(0.9, pBright);
-        // Particle size pulse
+        const pBright = isConnected ? (0.6 + Math.sin(t * 1.2 + sx) * 0.3) : (0.15 + Math.sin(t * 0.3) * 0.1);
+        particleRef.current.material.opacity = Math.min(0.9, pBright);
         if (particleRef.current.scale) {
-          const ps = 0.8 + Math.sin(phase * 1.5 + from.x) * 0.3;
+          const ps = 0.8 + Math.sin(phase * 1.5 + sx) * 0.3;
           particleRef.current.scale.setScalar(ps);
         }
       }
@@ -467,22 +500,21 @@ function ConnectionLine({ from, to, selected, srcColor }: {
         <bufferGeometry>
           <bufferAttribute
             attach="attributes-position"
-            count={points.length}
-            array={positions}
+            count={20}
+            array={new Float32Array(60)}
             itemSize={3}
           />
         </bufferGeometry>
         <lineBasicMaterial
-          color={c}
+          color={new THREE.Color(isConnected ? srcColor : "#ffffff")}
           transparent
-          opacity={0.12}
+          opacity={0.18}
           depthWrite={false}
-          linewidth={isConnected ? 2 : 1}
         />
       </line>
       <mesh ref={particleRef}>
         <sphereGeometry args={[0.08, 6, 6]} />
-        <meshBasicMaterial color={c} transparent opacity={0.2} />
+        <meshBasicMaterial color={srcColor} transparent opacity={0.3} depthWrite={false} />
       </mesh>
     </group>
   );
@@ -643,7 +675,7 @@ function Stars() {
 
 // === CAMERA CONTROLLER ===
 let orbitRef: any = null;
-function CameraController({ isMobile, autoRotate }: { isMobile: boolean; autoRotate: boolean }) {
+function CameraController({ isMobile, autoRotate, selectedNode }: { isMobile: boolean; autoRotate: boolean; selectedNode?: any }) {
   const ref = useRef<any>(null!);
   useEffect(() => { orbitRef = ref.current; }, []);
   useEffect(() => {
@@ -797,6 +829,15 @@ const Scene: React.FC = () => {
     return m;
   }, [layout]);
 
+  const nodePositionsRef = useRef(new Map<string, any>());
+  useEffect(() => {
+    const m = new Map<string, any>();
+    (layout as any[]).forEach((n: any) => {
+      m.set(n.id, { x: n.x || 0, y: n.y || 0, z: n.z || 0 });
+    });
+    nodePositionsRef.current = m;
+  }, [layout]);
+
   const rawNodeMap = useMemo(() => {
     const m = new Map<string, any>();
     raw.nodes.forEach((n: any) => m.set(n.id, n));
@@ -873,7 +914,7 @@ const Scene: React.FC = () => {
         <Stars />
         <FloatingSparkles />
         <HubRings nodeMap={nodeMap} selected={selected} />
-        <GroupLabels3D nodeMap={nodeMap} lang={lang} />
+        {!selected && <GroupLabels3D nodeMap={nodeMap} lang={lang} />}
         <ambientLight intensity={0.5} />
         <pointLight position={[0, 10, 10]} intensity={2} color="#aabbff" />
         <pointLight position={[-10, -5, -10]} intensity={1.5} color="#8888cc" />
@@ -884,7 +925,7 @@ const Scene: React.FC = () => {
           const tn = nodeMap.get(e.target);
           if (!sn || !tn) return null;
           const eColor = COLORS[tn.group || ''] || COLORS[sn.group || ''] || "#ffffff";
-          return <ConnectionLine key={i} from={sn} to={tn} selected={selected} srcColor={eColor} />;
+          return <ConnectionLine key={i} from={sn} to={tn} selected={selected} srcColor={eColor} nodePositions={nodePositionsRef} />;
         })}
 
         {(layout as any[]).map((n: any) => {
@@ -905,11 +946,13 @@ const Scene: React.FC = () => {
               isMobile={isMobile}
               highlight={vis}
               hidden={hidden}
+              labelsHidden={selected !== null}
+              nodePositions={nodePositionsRef}
             />
           );
         })}
 
-        <CameraController isMobile={isMobile} autoRotate={autoRotate} />
+        <CameraController isMobile={isMobile} autoRotate={autoRotate} selectedNode={selectedNode} />
       </Canvas>
 
       {/* Branding */}
