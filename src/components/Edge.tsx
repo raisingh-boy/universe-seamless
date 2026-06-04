@@ -43,7 +43,7 @@ const EdgeLine: React.FC<EdgeProps> = ({ edge, source, target, color }) => {
   const positions = new Float32Array(points.flatMap((p) => [p.x, p.y, p.z]));
 
   return (
-    <line ref={lineRef}>
+    <line ref={lineRef as any}>
       <bufferGeometry>
         <bufferAttribute
           attach="attributes-position"

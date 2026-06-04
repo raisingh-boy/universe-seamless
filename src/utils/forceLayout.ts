@@ -16,8 +16,8 @@ export function runForceSimulation(
   const degreeMap: Record<string, number> = {};
   for (const n of nodes) degreeMap[n.id] = 0;
   for (const e of edges) {
-    const src = typeof e.source === "string" ? e.source : e.source.id;
-    const tgt = typeof e.target === "string" ? e.target : e.target.id;
+    const src = typeof e.source === "string" ? e.source : (e.source as any).id;
+    const tgt = typeof e.target === "string" ? e.target : (e.target as any).id;
     if (degreeMap[src] !== undefined) degreeMap[src]++;
     if (degreeMap[tgt] !== undefined) degreeMap[tgt]++;
   }
@@ -33,9 +33,7 @@ export function runForceSimulation(
   const groupZ: Record<string, number> = {};
   groupOrder.forEach((g, i) => {
     const angle = (i / groupOrder.length) * Math.PI * 2;
-    groupZ[g] = {
-      z: Math.sin(angle) * 3,  // Z offset creates depth layers
-    };
+    groupZ[g] = Math.sin(angle) * 3;  // Z offset creates depth layers
   });
 
   // Attach degree and cluster info to nodes for the simulation
@@ -61,16 +59,16 @@ export function runForceSimulation(
         .id((d: any) => d.id)
         .distance((d: any) => {
           // Connected hubs should be closer
-          const srcDeg = degreeMap[typeof d.source === "string" ? d.source : d.source.id] || 1;
-          const tgtDeg = degreeMap[typeof d.target === "string" ? d.target : d.target.id] || 1;
+          const srcDeg = degreeMap[typeof d.source === "string" ? d.source : (d.source as any).id] || 1;
+          const tgtDeg = degreeMap[typeof d.target === "string" ? d.target : (d.target as any).id] || 1;
           const avgDeg = (srcDeg + tgtDeg) / 2;
           // More connected nodes: closer together (important connections)
           // Less connected: spread apart
-          return Math.max(15, 35 - avgDeg * 0.8);
+          return Math.max(5, 20 - avgDeg * 0.5);
         })
         .strength((d: any) => {
-          const srcDeg = degreeMap[typeof d.source === "string" ? d.source : d.source.id] || 1;
-          const tgtDeg = degreeMap[typeof d.target === "string" ? d.target : d.target.id] || 1;
+          const srcDeg = degreeMap[typeof d.source === "string" ? d.source : (d.source as any).id] || 1;
+          const tgtDeg = degreeMap[typeof d.target === "string" ? d.target : (d.target as any).id] || 1;
           const minDeg = Math.min(srcDeg, tgtDeg);
           // Stronger links between important nodes
           return Math.min(1, 0.2 + minDeg * 0.04);
@@ -80,7 +78,7 @@ export function runForceSimulation(
       .strength((d: any) => {
         // Hubs (high degree) have stronger push
         const deg = degreeMap[d.id] || 1;
-        return -(15 + deg * 1.5); // -20 to -60 based on degree
+        return -(25 + deg * 2.0); // -20 to -60 based on degree
       })
       .distanceMax(40) // Limit range of charge
     )
