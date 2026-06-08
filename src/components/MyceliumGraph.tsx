@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useState, useCallback } from 'react';
+import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { OrbitControls, Stars, Billboard, Text } from '@react-three/drei';
 import * as THREE from 'three';
@@ -275,164 +275,207 @@ function SomaticSphere({
 }
 
 // ============================================================
-// КОМПОНЕНТ РЕБРА (Curved Mycelial Strand + Interactive Signal Particle with 5 distinct relationship styles)
+// PARTICLE FLOW EDGE — живые потоки частиц вместо линий
+// Each edge = stream of particles A→B with Perlin-like noise paths.
+// Strength decays when idle, surges when active. On node movement:
+// particles scatter and reform (fast for strong edges, slow for weak).
 // ============================================================
-function MyceliumEdge({
-  source, target, color, activity, isActive, linkType = 'conceptual'
+const EDGE_PARTICLE_COUNT = 22;
+
+interface EdgeParticleData {
+  progress: number;
+  speed: number;
+  phase: number;
+  noiseAmp: number;
+  wx: number; wy: number; wz: number;
+  svx: number; svy: number; svz: number;
+  scattered: boolean;
+}
+
+function ParticleFlowEdge({
+  source, target, color, activity, isActive, linkType = 'conceptual', resonanceWeight = 0.5
 }: {
   source: SomaticNode; target: SomaticNode;
   color: string; activity: number; isActive: boolean;
   linkType?: 'conceptual' | 'historical' | 'practical' | 'resonance' | 'opposition';
+  resonanceWeight?: number;
 }) {
-  const lineRef = useRef<THREE.Line>(null!);
-  const particleRef = useRef<THREE.Mesh>(null!);
-  const progressRef = useRef(Math.random());
+  const meshRef = useRef<THREE.InstancedMesh>(null!);
   const SCALE = 0.045;
 
-  // Calculates organic curved bezier points dynamically responding to physics force changes
-  const getCurve = useCallback(() => {
-    const s = new THREE.Vector3(
-      (source.x || 0) * SCALE, (source.y || 0) * SCALE, (source.z || 0) * SCALE
-    );
-    const t = new THREE.Vector3(
-      (target.x || 0) * SCALE, (target.y || 0) * SCALE, (target.z || 0) * SCALE
-    );
-    const mid = new THREE.Vector3().addVectors(s, t).multiplyScalar(0.5);
-    const seed = ((source.id || '').charCodeAt(0) || 0) + ((target.id || '').charCodeAt(0) || 0);
-    const perp = new THREE.Vector3(
-      -(t.y - s.y), (t.x - s.x), (seed % 7) * 0.2
-    ).normalize().multiplyScalar(0.6 + (seed % 20) / 20 * 1.0);
-    return new THREE.QuadraticBezierCurve3(s, mid.clone().add(perp), t);
-  }, [source.x, source.y, source.z, target.x, target.y, target.z]);
+  const dummy = useMemo(() => new THREE.Object3D(), []);
 
-  // Determine physical characteristics based on 5 user-requested relationship styles
-  // 1) historical: solid muted steel/blue, thin, slower signal pulses
-  // 2) conceptual: elegant violet/indigo, smooth curves, standard speed
-  // 3) practical: electric green, dashed/broken, high speed
-  // 4) resonance: glowing hot amber/gold, thick breathing light, very fast pulses
-  // 5) opposition: bright red/crimson, jagged chaotic vibrations, extreme velocity
-  const getBaseColorAndSpeeds = () => {
-    switch (linkType) {
-      case 'historical':
-        return { 
-          hexColor: '#707D94', 
-          baseSpeed: 0.0016, 
-          lineWidth: 1, 
-          baseOpacity: isActive ? 0.45 : 0.12 
-        };
-      case 'practical':
-        return { 
-          hexColor: '#10B981', 
-          baseSpeed: 0.007, 
-          lineWidth: 1.5, 
-          baseOpacity: isActive ? 0.65 : 0.2 
-        };
-      case 'resonance':
-        return { 
-          hexColor: '#FFAE00', 
-          baseSpeed: 0.012, 
-          lineWidth: 2.5, 
-          baseOpacity: isActive ? 0.85 : 0.35 
-        };
-      case 'opposition':
-        return { 
-          hexColor: '#EF4444', 
-          baseSpeed: 0.018, 
-          lineWidth: 2.0, 
-          baseOpacity: isActive ? 0.9 : 0.4 
-        };
-      case 'conceptual':
-      default:
-        return { 
-          hexColor: color, 
-          baseSpeed: 0.0035, 
-          lineWidth: 1.2, 
-          baseOpacity: isActive ? 0.55 : 0.18 
-        };
-    }
-  };
+  const strengthRef = useRef(Math.min(1.0, 0.2 + resonanceWeight * 0.8));
+  const scatterRef = useRef({ active: false, timer: 0, duration: 1.0 });
 
-  const styleSettings = getBaseColorAndSpeeds();
-
-  useFrame((state, delta) => {
-    const multiplier = 1 + activity * 0.05;
-    const currentSpeed = (isActive ? styleSettings.baseSpeed * 1.8 : styleSettings.baseSpeed) * multiplier;
-    progressRef.current = (progressRef.current + currentSpeed) % 1;
-
-    const curve = getCurve();
-
-    if (lineRef.current) {
-      // 24 resolution points for standard, higher for opposition so we can trace waves correctly
-      const ptsCount = linkType === 'opposition' ? 38 : 24;
-      const pts = curve.getPoints(ptsCount);
-      
-      // Handle "opposition" link types with real interactive tension waves (vibrations)
-      if (linkType === 'opposition') {
-        const time = state.clock.getElapsedTime();
-        pts.forEach((pt, idx) => {
-          // Do not wave anchor start and end nodes to maintain connection continuity
-          if (idx > 0 && idx < pts.length - 1) {
-            const waveAmt = Math.sin(idx * 0.7 - time * 12.0) * 0.038;
-            pt.y += waveAmt;
-            pt.x += Math.cos(idx * 0.4 + time * 8.0) * 0.018;
-          }
-        });
-      }
-      
-      // Support dynamic pulsing of resonance relationships
-      if (lineRef.current.material) {
-        const mat = lineRef.current.material as THREE.LineBasicMaterial;
-        if (linkType === 'resonance') {
-          // Breathing intensity
-          mat.opacity = styleSettings.baseOpacity + Math.sin(state.clock.getElapsedTime() * 7) * 0.12;
-        } else if (linkType === 'practical') {
-          // Alternates pulses for a digital dashed-indicator feel
-          mat.opacity = styleSettings.baseOpacity * (Math.sin(state.clock.getElapsedTime() * 15) > 0 ? 1 : 0.4);
-        } else {
-          mat.opacity = styleSettings.baseOpacity;
-        }
-      }
-
-      (lineRef.current.geometry as THREE.BufferGeometry).setFromPoints(pts);
-    }
-
-    if (particleRef.current) {
-      const pt = curve.getPoint(progressRef.current);
-      particleRef.current.position.copy(pt);
-      
-      // Make resonance signal particle expand and contract
-      if (linkType === 'resonance') {
-        const scaleAmt = 1.0 + Math.sin(state.clock.getElapsedTime() * 10) * 0.35;
-        particleRef.current.scale.set(scaleAmt, scaleAmt, scaleAmt);
-      } else {
-        particleRef.current.scale.set(1, 1, 1);
-      }
-    }
+  const prevPosRef = useRef({
+    sx: source.x || 0, sy: source.y || 0,
+    tx: target.x || 0, ty: target.y || 0,
   });
 
-  const finalColor = new THREE.Color(styleSettings.hexColor);
+  const particles = useMemo<EdgeParticleData[]>(() =>
+    Array.from({ length: EDGE_PARTICLE_COUNT }, (_, i) => ({
+      progress: i / EDGE_PARTICLE_COUNT,
+      speed: 0.0028 + Math.random() * 0.0035,
+      phase: Math.random() * Math.PI * 2,
+      noiseAmp: 0.35 + Math.random() * 0.55,
+      wx: 0, wy: 0, wz: 0,
+      svx: 0, svy: 0, svz: 0,
+      scattered: false,
+    })), []
+  );
+
+  useFrame((state, delta) => {
+    if (!meshRef.current) return;
+    const t = state.clock.elapsedTime;
+
+    // Strength: boost on active, slow decay otherwise
+    if (isActive) {
+      strengthRef.current = Math.min(1.0, strengthRef.current + delta * 0.55);
+    } else {
+      strengthRef.current = Math.max(0.05, strengthRef.current - delta * 0.007);
+    }
+    const strength = strengthRef.current;
+
+    const sx = (source.x || 0) * SCALE;
+    const sy = (source.y || 0) * SCALE;
+    const sz = (source.z || 0) * SCALE;
+    const tx = (target.x || 0) * SCALE;
+    const ty = (target.y || 0) * SCALE;
+    const tz = (target.z || 0) * SCALE;
+
+    // Detect significant node movement to trigger scatter
+    const prev = prevPosRef.current;
+    const moveDist = Math.abs((source.x || 0) - prev.sx) + Math.abs((source.y || 0) - prev.sy)
+                   + Math.abs((target.x || 0) - prev.tx) + Math.abs((target.y || 0) - prev.ty);
+
+    if (moveDist > 1.5 && !scatterRef.current.active) {
+      // Strong edges reform faster (0.5s), weak edges take longer (1.7s)
+      const reformDur = 0.5 + (1.0 - strength) * 1.2;
+      scatterRef.current = { active: true, timer: reformDur, duration: reformDur };
+      prev.sx = source.x || 0; prev.sy = source.y || 0;
+      prev.tx = target.x || 0; prev.ty = target.y || 0;
+
+      particles.forEach(p => {
+        p.scattered = true;
+        p.svx = (Math.random() - 0.5) * 0.28;
+        p.svy = (Math.random() - 0.5) * 0.28;
+        p.svz = (Math.random() - 0.5) * 0.12;
+      });
+    }
+
+    if (scatterRef.current.active) {
+      scatterRef.current.timer -= delta;
+      if (scatterRef.current.timer <= 0) {
+        scatterRef.current.active = false;
+        particles.forEach(p => { p.scattered = false; });
+      }
+    }
+
+    // Edge geometry
+    const dx = tx - sx, dy = ty - sy, dz = tz - sz;
+    const edgeLen = Math.sqrt(dx*dx + dy*dy + dz*dz) || 1;
+    // XY perpendicular for noise displacement
+    const perpX = -dy / edgeLen;
+    const perpY = dx / edgeLen;
+
+    // Speed by link type
+    const typeSpeedMult = linkType === 'opposition' ? 2.4
+      : linkType === 'resonance' ? 1.8
+      : linkType === 'practical' ? 1.5 : 1.0;
+    const speedMult = typeSpeedMult * (isActive ? 1.7 : 1.0) * (1 + activity * 0.05);
+    const pSize = (isActive ? 0.021 : 0.015) * (0.6 + strength * 0.7);
+
+    const scatter = scatterRef.current;
+    const scatterFrac = scatter.active ? (scatter.timer / scatter.duration) : 0;
+
+    for (let i = 0; i < EDGE_PARTICLE_COUNT; i++) {
+      const p = particles[i];
+
+      if (strength < 0.1) {
+        dummy.scale.setScalar(0);
+        dummy.updateMatrix();
+        meshRef.current.setMatrixAt(i, dummy.matrix);
+        continue;
+      }
+
+      if (p.scattered) {
+        // Scatter drift
+        p.wx += p.svx;
+        p.wy += p.svy;
+        p.wz += p.svz;
+        p.svx *= 0.90; p.svy *= 0.90; p.svz *= 0.90;
+
+        dummy.position.set(p.wx, p.wy, p.wz);
+        const sf = pSize * scatterFrac * strength;
+        dummy.scale.setScalar(sf > 0.001 ? sf : 0);
+      } else {
+        // Normal particle flow
+        p.progress += p.speed * speedMult * delta * 55;
+        if (p.progress >= 1.0) {
+          p.progress -= 1.0;
+          // Slightly shift phase on loop for organic variation
+          p.phase += 0.25 + Math.random() * 0.5;
+          p.noiseAmp = 0.35 + Math.random() * 0.55;
+        }
+
+        const pr = p.progress;
+        const bx = sx + dx * pr;
+        const by = sy + dy * pr;
+        const bz = sz + dz * pr;
+
+        // Multi-octave noise (Perlin-like layered sin/cos)
+        const noiseScale = edgeLen * 0.11;
+        const n = (
+          Math.sin(pr * 9.3 + t * 1.3 + p.phase)       * 0.55 +
+          Math.cos(pr * 17.1 + t * 0.7 + p.phase * 1.8) * 0.27 +
+          Math.sin(pr * 31.9 + t * 2.1 + p.phase * 0.6) * 0.12
+        ) * p.noiseAmp * noiseScale;
+
+        const nz = Math.sin(pr * 7.2 + t * 1.4 + p.phase * 1.2) * p.noiseAmp * noiseScale * 0.28;
+
+        const wx = bx + perpX * n;
+        const wy = by + perpY * n;
+        const wz = bz + nz;
+
+        p.wx = wx; p.wy = wy; p.wz = wz;
+
+        // Fade at endpoints + scale by strength
+        const endFade = Math.min(pr * 5, (1 - pr) * 5, 1.0);
+        const sz2 = pSize * endFade * strength;
+        dummy.position.set(wx, wy, wz);
+        dummy.scale.setScalar(sz2 > 0.001 ? sz2 : 0);
+      }
+
+      dummy.updateMatrix();
+      meshRef.current.setMatrixAt(i, dummy.matrix);
+    }
+
+    meshRef.current.instanceMatrix.needsUpdate = true;
+  });
+
+  const finalColorStr = (() => {
+    switch (linkType) {
+      case 'historical':  return '#8B9AB5';
+      case 'practical':   return '#10B981';
+      case 'resonance':   return '#FFAE00';
+      case 'opposition':  return '#EF4444';
+      default:            return color;
+    }
+  })();
 
   return (
-    <group>
-      <line ref={lineRef as any}>
-        <bufferGeometry />
-        <lineBasicMaterial color={finalColor} transparent opacity={styleSettings.baseOpacity} />
-      </line>
-      <mesh ref={particleRef}>
-        <sphereGeometry args={[
-          linkType === 'resonance' ? 0.055 : (isActive ? 0.048 : 0.032), 
-          LinkTypeArgsSize(linkType), 
-          LinkTypeArgsSize(linkType)
-        ]} />
-        <meshBasicMaterial color={finalColor} />
-      </mesh>
-    </group>
+    <instancedMesh ref={meshRef} args={[undefined, undefined, EDGE_PARTICLE_COUNT]}>
+      <sphereGeometry args={[1, 5, 5]} />
+      <meshBasicMaterial
+        color={finalColorStr}
+        transparent
+        opacity={0.92}
+        depthWrite={false}
+        blending={THREE.AdditiveBlending}
+      />
+    </instancedMesh>
   );
-}
-
-// Low polygon details helper for speed
-function LinkTypeArgsSize(t: string): number {
-  return t === 'resonance' ? 8 : 5;
 }
 
 // ============================================================
@@ -1110,7 +1153,7 @@ function GraphScene({
         }
 
         return (
-          <MyceliumEdge
+          <ParticleFlowEdge
             key={link.id}
             source={src}
             target={tgt}
@@ -1118,6 +1161,7 @@ function GraphScene({
             activity={link.activity}
             isActive={isActive}
             linkType={link.type}
+            resonanceWeight={link.resonanceWeight}
           />
         );
       })}
