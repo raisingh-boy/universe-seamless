@@ -1,10 +1,11 @@
-import React, { useRef, useEffect, useState, useCallback } from 'react';
+import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { OrbitControls, Stars, Billboard, Text } from '@react-three/drei';
 import * as THREE from 'three';
 import { SomaticNode, SomaticLink, Domain, World, NodeStatus, CommunityUser } from '../types';
 import { SAMPLE_AUDIO } from '../data/nodesData';
 import { Flame } from 'lucide-react';
+import { playNodeTone } from '../api/nodeSounds';
 
 // ============================================================
 // ЦВЕТА ДОМЕНОВ (Domain Colors)
@@ -17,6 +18,18 @@ const DOMAIN_COLORS: Record<Domain, string> = {
   cognition: '#EAEAEA',  // Silver-White
   hybrid: '#E85C7A'     // Coral
 };
+
+// ============================================================
+// GLOBAL VISUAL PHASE (RAF-based sync for all pulsation)
+// ============================================================
+const _visPhaseRef = { value: 0 };
+if (typeof window !== 'undefined') {
+  (function updateVisPhase() {
+    _visPhaseRef.value = (Date.now() / 1200) % (Math.PI * 2);
+    requestAnimationFrame(updateVisPhase);
+  })();
+}
+function getVisualPhase() { return _visPhaseRef.value; }
 
 // ============================================================
 // ХЕЛПЕР ОПРЕДЕЛЕНИЯ ЭПОХИ ДЛЯ НОДЫ (Epoch Map Helper)
@@ -143,7 +156,10 @@ function SomaticSphere({
 
   useFrame((state) => {
     const t = state.clock.elapsedTime;
-    const breath = 1 + Math.sin(t * (node.breathSpeed || 0.4) + (node.breathPhase || 0)) * 0.07;
+    const phase = getVisualPhase();
+    const nodeHash = node.id.charCodeAt(0);
+    const audioWave = 0.5 + Math.sin(phase * 2.5 + nodeHash * 0.1) * 0.5;
+    const breath = 1 + Math.sin(t * (node.breathSpeed || 0.4) + (node.breathPhase || 0)) * 0.09 + audioWave * 0.035;
     const base = (node.currentRadius || 10) * SCALE;
 
     const camDist = state.camera.position.length();
@@ -165,6 +181,7 @@ function SomaticSphere({
     let s = base * breath * lodScale;
     if (isSelected) s *= 1.35;
     else if (isActiveAudio) s *= 1.25;
+    else if (isHovered) s *= 1.15;
 
     meshRef.current.scale.setScalar(s);
     glowRef.current.scale.setScalar(s * (isActiveAudio ? 2.5 : 1.7));
@@ -246,15 +263,15 @@ function SomaticSphere({
   };
 
   return (
-    <group 
+    <group
       onClick={(e) => { e.stopPropagation(); onClick(node); }}
     >
       {/* Outer soft glow sphere */}
       <mesh ref={glowRef}>
         <sphereGeometry args={[1, 12, 12]} />
-        <meshStandardMaterial
-          color={c} transparent opacity={isSelected ? 0.25 : isActiveAudio ? 0.35 : inEpoch ? 0.08 : 0.01}
-          depthWrite={false}
+        <meshBasicMaterial
+          color={c} transparent opacity={isSelected ? 0.18 : isActiveAudio ? 0.28 : inEpoch ? 0.06 : 0.01}
+          depthWrite={false} blending={THREE.AdditiveBlending}
         />
       </mesh>
       {/* Internal core mesh which adapts its geometry according to node type */}
@@ -287,6 +304,8 @@ function MyceliumEdge({
   const lineRef = useRef<THREE.Line>(null!);
   const particleRef = useRef<THREE.Mesh>(null!);
   const progressRef = useRef(Math.random());
+  const particle2Ref = useRef<THREE.Mesh>(null!);
+  const particle3Ref = useRef<THREE.Mesh>(null!);
   const SCALE = 0.045;
 
   // Calculates organic curved bezier points dynamically responding to physics force changes
@@ -314,40 +333,40 @@ function MyceliumEdge({
   const getBaseColorAndSpeeds = () => {
     switch (linkType) {
       case 'historical':
-        return { 
-          hexColor: '#707D94', 
-          baseSpeed: 0.0016, 
-          lineWidth: 1, 
-          baseOpacity: isActive ? 0.45 : 0.12 
+        return {
+          hexColor: '#707D94',
+          baseSpeed: 0.0016,
+          lineWidth: 1,
+          baseOpacity: isActive ? 0.45 : 0.12
         };
       case 'practical':
-        return { 
-          hexColor: '#10B981', 
-          baseSpeed: 0.007, 
-          lineWidth: 1.5, 
-          baseOpacity: isActive ? 0.65 : 0.2 
+        return {
+          hexColor: '#10B981',
+          baseSpeed: 0.007,
+          lineWidth: 1.5,
+          baseOpacity: isActive ? 0.65 : 0.2
         };
       case 'resonance':
-        return { 
-          hexColor: '#FFAE00', 
-          baseSpeed: 0.012, 
-          lineWidth: 2.5, 
-          baseOpacity: isActive ? 0.85 : 0.35 
+        return {
+          hexColor: '#FFAE00',
+          baseSpeed: 0.012,
+          lineWidth: 2.5,
+          baseOpacity: isActive ? 0.85 : 0.35
         };
       case 'opposition':
-        return { 
-          hexColor: '#EF4444', 
-          baseSpeed: 0.018, 
-          lineWidth: 2.0, 
-          baseOpacity: isActive ? 0.9 : 0.4 
+        return {
+          hexColor: '#EF4444',
+          baseSpeed: 0.018,
+          lineWidth: 2.0,
+          baseOpacity: isActive ? 0.9 : 0.4
         };
       case 'conceptual':
       default:
-        return { 
-          hexColor: color, 
-          baseSpeed: 0.0035, 
-          lineWidth: 1.2, 
-          baseOpacity: isActive ? 0.55 : 0.18 
+        return {
+          hexColor: color,
+          baseSpeed: 0.0035,
+          lineWidth: 1.2,
+          baseOpacity: isActive ? 0.55 : 0.18
         };
     }
   };
@@ -365,7 +384,7 @@ function MyceliumEdge({
       // 24 resolution points for standard, higher for opposition so we can trace waves correctly
       const ptsCount = linkType === 'opposition' ? 38 : 24;
       const pts = curve.getPoints(ptsCount);
-      
+
       // Handle "opposition" link types with real interactive tension waves (vibrations)
       if (linkType === 'opposition') {
         const time = state.clock.getElapsedTime();
@@ -378,7 +397,7 @@ function MyceliumEdge({
           }
         });
       }
-      
+
       // Support dynamic pulsing of resonance relationships
       if (lineRef.current.material) {
         const mat = lineRef.current.material as THREE.LineBasicMaterial;
@@ -399,7 +418,7 @@ function MyceliumEdge({
     if (particleRef.current) {
       const pt = curve.getPoint(progressRef.current);
       particleRef.current.position.copy(pt);
-      
+
       // Make resonance signal particle expand and contract
       if (linkType === 'resonance') {
         const scaleAmt = 1.0 + Math.sin(state.clock.getElapsedTime() * 10) * 0.35;
@@ -407,6 +426,18 @@ function MyceliumEdge({
       } else {
         particleRef.current.scale.set(1, 1, 1);
       }
+    }
+    if (particle2Ref.current) {
+      const p2 = curve.getPoint((progressRef.current + 0.33) % 1);
+      particle2Ref.current.position.copy(p2);
+      if (linkType === 'resonance') {
+        const s2 = 0.8 + Math.sin(state.clock.getElapsedTime() * 10 + 2) * 0.25;
+        particle2Ref.current.scale.setScalar(s2);
+      }
+    }
+    if (particle3Ref.current) {
+      const p3 = curve.getPoint((progressRef.current + 0.66) % 1);
+      particle3Ref.current.position.copy(p3);
     }
   });
 
@@ -420,11 +451,19 @@ function MyceliumEdge({
       </line>
       <mesh ref={particleRef}>
         <sphereGeometry args={[
-          linkType === 'resonance' ? 0.055 : (isActive ? 0.048 : 0.032), 
-          LinkTypeArgsSize(linkType), 
+          linkType === 'resonance' ? 0.055 : (isActive ? 0.048 : 0.032),
+          LinkTypeArgsSize(linkType),
           LinkTypeArgsSize(linkType)
         ]} />
         <meshBasicMaterial color={finalColor} />
+      </mesh>
+      <mesh ref={particle2Ref}>
+        <sphereGeometry args={[linkType === 'resonance' ? 0.038 : 0.022, 4, 4]} />
+        <meshBasicMaterial color={finalColor} transparent opacity={0.5} />
+      </mesh>
+      <mesh ref={particle3Ref}>
+        <sphereGeometry args={[linkType === 'resonance' ? 0.026 : 0.016, 4, 4]} />
+        <meshBasicMaterial color={finalColor} transparent opacity={0.3} />
       </mesh>
     </group>
   );
@@ -490,13 +529,121 @@ function GoldenOverlayBridges({ nodes, SCALE }: { nodes: SomaticNode[]; SCALE: n
 }
 
 // ============================================================
+// FLOATING SPARKLES - ambient particle field
+// ============================================================
+function FloatingSparkles() {
+  const count = 200;
+  const { positions, velocities } = useMemo(() => {
+    const positions = new Float32Array(count * 3);
+    const velocities = new Float32Array(count * 3);
+    for (let i = 0; i < count; i++) {
+      const r = 10 + Math.random() * 45;
+      const theta = Math.random() * Math.PI;
+      const phi = Math.random() * Math.PI * 2;
+      positions[i*3]   = Math.sin(theta) * Math.cos(phi) * r;
+      positions[i*3+1] = Math.sin(theta) * Math.sin(phi) * r;
+      positions[i*3+2] = Math.cos(theta) * r;
+      velocities[i*3]   = (Math.random() - 0.5) * 0.003;
+      velocities[i*3+1] = (Math.random() - 0.5) * 0.003;
+      velocities[i*3+2] = (Math.random() - 0.5) * 0.002;
+    }
+    return { positions, velocities };
+  }, []);
+  const attrRef = useRef<THREE.BufferAttribute>(null!);
+  useFrame((state) => {
+    if (!attrRef.current) return;
+    const arr = attrRef.current.array as Float32Array;
+    const t = state.clock.elapsedTime;
+    for (let i = 0; i < count; i++) {
+      arr[i*3]   += velocities[i*3]   + Math.sin(t * 0.3 + i * 0.7) * 0.0008;
+      arr[i*3+1] += velocities[i*3+1] + Math.cos(t * 0.25 + i * 0.5) * 0.0008;
+      arr[i*3+2] += velocities[i*3+2];
+      const r2 = arr[i*3]**2 + arr[i*3+1]**2 + arr[i*3+2]**2;
+      if (r2 > 3025) { arr[i*3] *= 0.997; arr[i*3+1] *= 0.997; arr[i*3+2] *= 0.997; }
+    }
+    attrRef.current.needsUpdate = true;
+  });
+  return (
+    <points>
+      <bufferGeometry>
+        <bufferAttribute ref={attrRef} attach="attributes-position" args={[positions, 3]} />
+      </bufferGeometry>
+      <pointsMaterial size={0.045} color="#aab8ff" transparent opacity={0.28}
+        sizeAttenuation blending={THREE.AdditiveBlending} depthWrite={false} />
+    </points>
+  );
+}
+
+// ============================================================
+// HUB RING PULSE - expanding concentric rings for hub nodes
+// ============================================================
+function HubRingPulse({ x, y, z, color, isSelected }: {
+  x: number; y: number; z: number; color: string; isSelected: boolean;
+}) {
+  const r1 = useRef<THREE.Mesh>(null!);
+  const r2 = useRef<THREE.Mesh>(null!);
+  const ph = useRef(Math.random() * Math.PI * 2);
+  useFrame(({ clock }) => {
+    const t = clock.elapsedTime + ph.current;
+    const speed = isSelected ? 0.7 : 0.45;
+    const maxS = isSelected ? 6 : 3.5;
+    const baseOp = isSelected ? 0.3 : 0.09;
+    [r1, r2].forEach((ref, i) => {
+      const p = ((t * speed) + i * 0.5) % 1;
+      if (ref.current) {
+        ref.current.scale.setScalar(0.3 + p * maxS);
+        ref.current.position.set(x, y, z);
+        (ref.current.material as THREE.Material).opacity = (1 - p) * baseOp;
+      }
+    });
+  });
+  const ringMat = (
+    <meshBasicMaterial color={color} transparent opacity={0}
+      depthWrite={false} side={THREE.DoubleSide} blending={THREE.AdditiveBlending} />
+  );
+  const rot: [number, number, number] = [-Math.PI / 2, 0, 0];
+  return (
+    <>
+      <mesh ref={r1} rotation={rot}><ringGeometry args={[0.85, 1.05, 32]} />{ringMat}</mesh>
+      <mesh ref={r2} rotation={rot}><ringGeometry args={[0.85, 1.05, 32]} />{ringMat}</mesh>
+    </>
+  );
+}
+
+// ============================================================
+// RIPPLE EFFECT - expanding ring on node click
+// ============================================================
+function RippleEffect({ x, y, z, color, onDone }: {
+  x: number; y: number; z: number; color: string; onDone: () => void;
+}) {
+  const mRef = useRef<THREE.Mesh>(null!);
+  const t0 = useRef<number | null>(null);
+  useFrame(({ clock }) => {
+    if (t0.current === null) t0.current = clock.elapsedTime;
+    const p = Math.min((clock.elapsedTime - t0.current) / 1.0, 1);
+    if (p >= 1) { onDone(); return; }
+    if (mRef.current) {
+      mRef.current.scale.setScalar(0.4 + p * 9);
+      (mRef.current.material as THREE.Material).opacity = (1 - p) * 0.55;
+    }
+  });
+  return (
+    <mesh ref={mRef} position={[x, y, z]} rotation={[-Math.PI / 2, 0, 0]}>
+      <ringGeometry args={[0.8, 1.0, 32]} />
+      <meshBasicMaterial color={color} transparent opacity={0.55}
+        depthWrite={false} side={THREE.DoubleSide} blending={THREE.AdditiveBlending} />
+    </mesh>
+  );
+}
+
+// ============================================================
 // ВЫРАВНЕННЫЙ БИЛЛБОРД С НАЗВАНИЕМ НОДЫ (Labels Billboard)
 // ============================================================
 function NodeLabel({ node, language, SCALE, isSelected, isActiveAudio }: {
   node: SomaticNode; language: 'ru' | 'en'; SCALE: number; isSelected: boolean; isActiveAudio: boolean;
 }) {
   if (node.status === 'seed' && node.id !== 'central-me') return null; // seed nodes do not have any name label
-  
+
   const label = language === 'ru' ? node.nameRu : node.nameEn;
   const radius = (node.currentRadius || 10) * SCALE;
 
@@ -562,23 +709,41 @@ interface GraphSceneProps {
 
 // Custom wrapper to bind PointerDown and PointerUp for long tap (circular radial menu) detection
 function InteractiveSomaticSphere({
-  node, isSelected, isHovered, isActiveAudio, color, onClick, onLongSelect, currentWorld, overlayUser, selectedEpoch, ascendingNodeId
+  node, isSelected, isHovered, isActiveAudio, color, onClick, onLongSelect, currentWorld, overlayUser, selectedEpoch, ascendingNodeId, onDragStart
 }: {
   node: SomaticNode; isSelected: boolean; isHovered: boolean; isActiveAudio: boolean;
   color: string; onClick: (n: SomaticNode) => void; onLongSelect?: (n: SomaticNode, cx: number, cy: number) => void;
   currentWorld: World; overlayUser: string | null; selectedEpoch?: number; ascendingNodeId?: string | null;
+  onDragStart?: (nodeId: string, cx: number, cy: number) => void;
 }) {
   const pointerTimeRef = useRef(0);
   const pointerPosRef = useRef({ x: 0, y: 0 });
+  const isDragRef = useRef(false);
 
   const handlePointerDown = (e: any) => {
     e.stopPropagation();
+    isDragRef.current = false;
     pointerTimeRef.current = Date.now();
     pointerPosRef.current = { x: e.clientX, y: e.clientY };
   };
 
+  const handlePointerMove = (e: any) => {
+    if (!isDragRef.current) {
+      const dx = e.clientX - pointerPosRef.current.x;
+      const dy = e.clientY - pointerPosRef.current.y;
+      if (Math.sqrt(dx * dx + dy * dy) > 5) {
+        isDragRef.current = true;
+        onDragStart?.(node.id, e.clientX, e.clientY);
+      }
+    }
+  };
+
   const handlePointerUp = (e: any) => {
     e.stopPropagation();
+    if (isDragRef.current) {
+      isDragRef.current = false;
+      return;
+    }
     const duration = Date.now() - pointerTimeRef.current;
     const distance = Math.sqrt((e.clientX - pointerPosRef.current.x) ** 2 + (e.clientY - pointerPosRef.current.y) ** 2);
     if (distance < 15) {
@@ -591,7 +756,7 @@ function InteractiveSomaticSphere({
   };
 
   return (
-    <group onPointerDown={handlePointerDown} onPointerUp={handlePointerUp}>
+    <group onPointerDown={handlePointerDown} onPointerUp={handlePointerUp} onPointerMove={handlePointerMove}>
       <SomaticSphere
         node={node}
         isSelected={isSelected}
@@ -618,7 +783,7 @@ function GraphScene({
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [camDist, setCamDist] = useState(24);
 
-  const { camera } = useThree();
+  const { camera, gl, raycaster } = useThree();
   const { controls } = useThree() as any;
 
   // Physics state representation maintained synchronously inside useRef context to prevent stuttering
@@ -635,6 +800,48 @@ function GraphScene({
 
   // Users ref tracking for electrostatic layout
   const usersStateRef = useRef<any[]>([]);
+
+  const dragStateRef = useRef<{ nodeId: string | null; plane: THREE.Plane }>({
+    nodeId: null, plane: new THREE.Plane()
+  });
+  const [ripples, setRipples] = useState<{ id: string; x: number; y: number; z: number; color: string }[]>([]);
+
+  const handleDragStart = useCallback((nodeId: string, _cx: number, _cy: number) => {
+    const DRAG_SCALE = 0.045;
+    const node = graphStateRef.current.nodes.find(n => n.id === nodeId);
+    if (!node) return;
+    dragStateRef.current.nodeId = nodeId;
+    const nodePos = new THREE.Vector3(
+      (node.x || 0) * DRAG_SCALE, (node.y || 0) * DRAG_SCALE, (node.z || 0) * DRAG_SCALE
+    );
+    const planeNormal = camera.position.clone().sub(nodePos).normalize();
+    dragStateRef.current.plane.setFromNormalAndCoplanarPoint(planeNormal, nodePos);
+    if (controls) controls.enabled = false;
+    const onMove = (e: PointerEvent) => {
+      const nd = graphStateRef.current.nodes.find(n => n.id === dragStateRef.current.nodeId);
+      if (!nd) return;
+      const rect = gl.domElement.getBoundingClientRect();
+      const mouse = new THREE.Vector2(
+        ((e.clientX - rect.left) / rect.width) * 2 - 1,
+        -((e.clientY - rect.top) / rect.height) * 2 + 1
+      );
+      raycaster.setFromCamera(mouse, camera);
+      const hit = new THREE.Vector3();
+      if (raycaster.ray.intersectPlane(dragStateRef.current.plane, hit)) {
+        nd.x = hit.x / DRAG_SCALE; nd.y = hit.y / DRAG_SCALE; nd.z = hit.z / DRAG_SCALE;
+        nd.vx = 0; nd.vy = 0; nd.vz = 0;
+        nd.targetX = nd.x; nd.targetY = nd.y; nd.targetZ = nd.z;
+      }
+    };
+    const onUp = () => {
+      dragStateRef.current.nodeId = null;
+      if (controls) controls.enabled = true;
+      gl.domElement.removeEventListener('pointermove', onMove);
+      gl.domElement.removeEventListener('pointerup', onUp);
+    };
+    gl.domElement.addEventListener('pointermove', onMove);
+    gl.domElement.addEventListener('pointerup', onUp);
+  }, [camera, controls, gl, raycaster]);
 
   useEffect(() => {
     if (communityUsers && communityUsers.length > 0) {
@@ -660,12 +867,21 @@ function GraphScene({
   useEffect(() => {
     const gState = graphStateRef.current;
     const internalNodes = gState.nodes;
-    
+
     const worldChanged = gState.lastWorld !== currentWorld;
     if (worldChanged) {
       gState.lastWorld = currentWorld;
       gState.transitionProgress = 0.0;
     }
+
+    // Pre-calculate per-domain-level node indices for spiral galaxy layout
+    const _dlIdx: Record<string, number> = {};
+    const _dlCount: Record<string, number> = {};
+    nodes.forEach(n => {
+      const key = `${n.domain}-${n.level}`;
+      _dlIdx[n.id] = _dlCount[key] || 0;
+      _dlCount[key] = (_dlCount[key] || 0) + 1;
+    });
 
     const newNodes = nodes.map((n, idx) => {
       const ex = internalNodes.find(e => e.id === n.id);
@@ -676,59 +892,34 @@ function GraphScene({
       // Calculate target positions dynamically for this currentWorld
       let tx = 0, ty = 0, tz = 0;
       if (currentWorld === 'atlas') {
-        const cxMap: Record<string, number> = {
-          body: 70,
-          science: -75,
-          philosophy: -95,
-          movement: 80,
-          cognition: -10,
-          hybrid: 10
+        // Spiral galaxy: 6 arms, one per domain
+        // Macro nodes cluster near center, micro fan outward
+        const ARM_ANGLE: Record<string, number> = {
+          body: 0,
+          science: Math.PI / 3,
+          philosophy: (2 * Math.PI) / 3,
+          movement: Math.PI,
+          cognition: (4 * Math.PI) / 3,
+          hybrid: (5 * Math.PI) / 3,
         };
-        const cyMap: Record<string, number> = {
-          body: -80,
-          science: 80,
-          philosophy: 90,
-          movement: -65,
-          cognition: -70,
-          hybrid: 85
-        };
-        const czMap: Record<string, number> = {
-          body: -20,
-          science: -15,
-          philosophy: 10,
-          movement: 20,
-          cognition: 45,
-          hybrid: -55
-        };
-
-        const cx = cxMap[n.domain] || 0;
-        const cy = cyMap[n.domain] || 0;
-        const cz = czMap[n.domain] || 0;
-
+        const armBase = ARM_ANGLE[n.domain] ?? (idx * 1.05);
+        const domIdx = _dlIdx[n.id] ?? idx;
+        const domTotal = Math.max(1, _dlCount[`${n.domain}-${n.level}`] ?? 1);
+        const rMin = n.level === 'macro' ? 6 : n.level === 'meso' ? 36 : 76;
+        const rMax = n.level === 'macro' ? 26 : n.level === 'meso' ? 66 : 116;
+        const r = rMin + (domIdx / domTotal) * (rMax - rMin);
+        const spread = n.level === 'macro' ? 0.22 : n.level === 'meso' ? 0.48 : 0.68;
+        const angOffset = domTotal > 1 ? ((domIdx / (domTotal - 1)) - 0.5) * Math.PI * spread : 0;
+        const angle = armBase + angOffset;
+        tx = Math.cos(angle) * r;
+        ty = Math.sin(angle) * r * 0.58;
+        const zRange = n.level === 'macro' ? 10 : n.level === 'meso' ? 22 : 36;
+        const seed = (n.id.charCodeAt(0) * 17 + (n.id.charCodeAt(1) || 7) * 11) % 100;
+        tz = ((seed / 50) - 1) * zRange;
         if (x === undefined || y === undefined || z === undefined) {
-          x = cx + (Math.random() - 0.5) * 30;
-          y = cy + (Math.random() - 0.5) * 30;
-          z = cz + (Math.random() - 0.5) * 30;
-        }
-
-        if (n.level === 'macro') {
-          tx = cx + Math.sin(idx) * 4;
-          ty = cy + Math.cos(idx) * 4;
-          tz = cz + Math.sin(idx * 2) * 4;
-        } else if (n.level === 'meso') {
-          const localDist = 28 + (idx % 4) * 6;
-          const theta = (idx * 1.5) % Math.PI;
-          const phi = (idx * 2.3) % (Math.PI * 2);
-          tx = cx + Math.sin(theta) * Math.cos(phi) * localDist;
-          ty = cy + Math.sin(theta) * Math.sin(phi) * localDist;
-          tz = cz + Math.cos(theta) * localDist;
-        } else {
-          const localDist = 58 + (idx % 6) * 6;
-          const theta = (idx * 1.8) % Math.PI;
-          const phi = (idx * 2.7) % (Math.PI * 2);
-          tx = cx + Math.sin(theta) * Math.cos(phi) * localDist;
-          ty = cy + Math.sin(theta) * Math.sin(phi) * localDist;
-          tz = cz + Math.cos(theta) * localDist;
+          x = tx + (Math.random() - 0.5) * 18;
+          y = ty + (Math.random() - 0.5) * 18;
+          z = tz + (Math.random() - 0.5) * 12;
         }
       } else if (currentWorld === 'field') {
         const angle = (idx * 0.72) % (Math.PI * 2);
@@ -857,7 +1048,7 @@ function GraphScene({
       if (!dist) return;
       const stretch = dist - 145;
       const pull = stretch * attractionStrength * Math.log(link.resonanceWeight + 1);
-      
+
       if (src.id !== 'central-me') {
         src.vx = (src.vx || 0) + (dx / dist) * pull;
         src.vy = (src.vy || 0) + (dy / dist) * pull;
@@ -885,20 +1076,20 @@ function GraphScene({
         node.vx = (node.vx || 0) + ((node.targetX || 0) - (node.x || 0)) * gravityStrength;
         node.vy = (node.vy || 0) + ((node.targetY || 0) - (node.y || 0)) * gravityStrength;
         node.vz = (node.vz || 0) + ((node.targetZ || 0) - (node.z || 0)) * gravityStrength;
-        
+
         node.x = (node.x || 0) + (node.vx || 0);
         node.y = (node.y || 0) + (node.vy || 0);
         node.z = (node.z || 0) + (node.vz || 0);
-        
+
         node.vx = (node.vx || 0) * damping;
         node.vy = (node.vy || 0) * damping;
         node.vz = (node.vz || 0) * damping;
-        
+
         // PURE LIVING WAVE SWAY: beautiful deterministic smooth swells of sine/cosine!
         const swellX = Math.sin(time * 1.1 + idx * 0.7) * 0.16;
         const swellY = Math.cos(time * 0.8 + idx * 0.4) * 0.16;
         const swellZ = Math.sin(time * 1.4 + idx * 0.9) * 0.1;
-        
+
         node.x += swellX;
         node.y += swellY;
         node.z += swellZ;
@@ -936,14 +1127,14 @@ function GraphScene({
 
           // Electrostatic charge logic: matching domains attract, different repaint
           const isSimilar = u1.dominantDomain === u2.dominantDomain;
-          const force = isSimilar 
+          const force = isSimilar
             ? -12 / (distSq + 12)    // attract
             : 420 / (distSq + 30);   // repel
-          
+
           u1.vx = (u1.vx || 0) - (dx / dist) * force;
           u1.vy = (u1.vy || 0) - (dy / dist) * force;
           u1.vz = (u1.vz || 0) - (dz / dist) * force;
-          
+
           u2.vx = (u2.vx || 0) + (dx / dist) * force;
           u2.vy = (u2.vy || 0) + (dy / dist) * force;
           u2.vz = (u2.vz || 0) + (dz / dist) * force;
@@ -1065,6 +1256,7 @@ function GraphScene({
   return (
     <>
       <Stars radius={110} depth={55} count={1650} factor={4} fade speed={1.2} />
+      <FloatingSparkles />
 
       <ambientLight intensity={0.4} />
       <pointLight position={[15, 15, 15]} intensity={2.2} color="#ccddff" />
@@ -1096,7 +1288,7 @@ function GraphScene({
         const tgt = filteredNodes.find(n => n.id === link.target);
         if (!src || !tgt) return null;
         const isActive = selectedNodeId === link.source || selectedNodeId === link.target;
-        
+
         // Hide link in FAR LOD modes to prevent spider-web cluttering
         if (src.level === 'micro' && camDist > 24) return null;
         if (tgt.level === 'micro' && camDist > 24) return null;
@@ -1125,13 +1317,30 @@ function GraphScene({
       {/* Golden Comparative Bridges */}
       {overlayUser && <GoldenOverlayBridges nodes={filteredNodes} SCALE={SCALE} />}
 
+      {/* Hub ring pulses for high-resonance nodes */}
+      {filteredNodes
+        .filter(n => n.resonances > 25 || selectedNodeId === n.id)
+        .sort((a, b) => b.resonances - a.resonances)
+        .slice(0, 8)
+        .map(n => (
+          <HubRingPulse
+            key={`ring-${n.id}`}
+            x={(n.x || 0) * SCALE}
+            y={(n.y || 0) * SCALE}
+            z={(n.z || 0) * SCALE}
+            color={DOMAIN_COLORS[n.domain] || '#ffffff'}
+            isSelected={selectedNodeId === n.id}
+          />
+        ))
+      }
+
       {/* Somatic nodes representation */}
       {filteredNodes.map(node => {
         // Field World visual distinction: all non-Me nodes are colored light teal/blue-green!
-        let color = node.id === 'central-me' 
-          ? '#DFB757' 
-          : currentWorld === 'field' 
-            ? '#14B8A6' 
+        let color = node.id === 'central-me'
+          ? '#DFB757'
+          : currentWorld === 'field'
+            ? '#14B8A6'
             : (DOMAIN_COLORS[node.domain] || '#ffffff');
 
         if (vibeMode === 'mono') {
@@ -1146,12 +1355,21 @@ function GraphScene({
             isHovered={hoveredId === node.id}
             isActiveAudio={activeAudioNodeId === node.id}
             color={color}
-            onClick={onNodeSelect}
+            onClick={(n) => {
+              onNodeSelect(n);
+              playNodeTone(n.domain, 0.18);
+              const SCALE = 0.045;
+              setRipples(prev => [
+                ...prev.slice(-4),
+                { id: `${n.id}-${Date.now()}`, x: (n.x||0)*SCALE, y: (n.y||0)*SCALE, z: (n.z||0)*SCALE, color: DOMAIN_COLORS[n.domain] || '#ffffff' }
+              ]);
+            }}
             onLongSelect={onLongPressNode}
             currentWorld={currentWorld}
             overlayUser={overlayUser}
             selectedEpoch={selectedEpoch}
             ascendingNodeId={ascendingNodeId}
+            onDragStart={handleDragStart}
           />
         );
       })}
@@ -1169,19 +1387,19 @@ function GraphScene({
         return (
           <group key={user.id} onClick={(e) => { e.stopPropagation(); onUserSelect?.(user); }}>
             {/* Rapidly rotating crystal star */}
-            <mesh 
-              position={[ux, uy, uz]} 
+            <mesh
+              position={[ux, uy, uz]}
               rotation={[idx + Date.now() * 0.001 * 0.4, Date.now() * 0.001 * 0.8, idx * 0.5]}
               onPointerOver={(e) => { e.stopPropagation(); setHoveredId(user.id); }}
               onPointerOut={() => setHoveredId(null)}
             >
               <octahedronGeometry args={[size, 0]} />
-              <meshStandardMaterial 
-                color={uc} 
-                emissive={uc} 
+              <meshStandardMaterial
+                color={uc}
+                emissive={uc}
                 emissiveIntensity={isUserHovered ? 1.9 : 0.8}
-                transparent 
-                opacity={0.92} 
+                transparent
+                opacity={0.92}
               />
             </mesh>
             {/* Holographic light sphere */}
@@ -1221,7 +1439,7 @@ function GraphScene({
       {filteredNodes.map(node => {
         const inEpoch = selectedEpoch === undefined || selectedEpoch === 0 || node.id === 'central-me' || getEpochNumberForNode(node) === selectedEpoch;
         if (!inEpoch) return null; // hide label if faded out of epoch focus
-        
+
         // LOD rule for labels
         if (node.level === 'micro' && camDist > 20) return null;
         if (node.level === 'meso' && camDist > 34) return null;
@@ -1237,6 +1455,16 @@ function GraphScene({
           />
         );
       })}
+
+      {/* Ripple effects on node click */}
+      {ripples.map(rip => (
+        <RippleEffect
+          key={rip.id}
+          x={rip.x} y={rip.y} z={rip.z}
+          color={rip.color}
+          onDone={() => setRipples(prev => prev.filter(r => r.id !== rip.id))}
+        />
+      ))}
     </>
   );
 }
